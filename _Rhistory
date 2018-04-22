@@ -1,0 +1,512 @@
+## initialize Wk
+data("kegg_network")
+c <- length(kegg_id)
+Wk <- Matrix::Matrix(0,ncol=c,nrow=c,sparse = T)
+## deal with muiltiple KEGG IDs and missing KEGG IDs
+ids <- c()
+indexes <- c()
+for (i in 1:c){
+if (kegg_id[i]!=''){
+## multiple IDs
+if(grepl(' ',kegg_id[i])){
+add <- unique(strsplit(kegg_id[i],' ')[[1]])
+ids <- c(ids,add)
+indexes <- c(indexes,rep(i,length(add)))
+} else {
+ids <- c(ids,kegg_id[i])
+indexes <- c(indexes,i)
+}
+}
+}
+## subset useful kegg_network and replace them with indexes
+sub_netdb <- kegg_network[(kegg_network$r1 %in% ids)&(kegg_network$r2 %in% ids),]
+if (nrow(sub_netdb)==0){
+return(Wk)
+}
+for (i in 1: dim(sub_netdb)[1]){
+sub_netdb$r1[i] <- indexes[which(sub_netdb$r1[i]==ids)][1]
+sub_netdb$r2[i] <- indexes[which(sub_netdb$r2[i]==ids)][1]
+}
+## turn index pairs into matrix
+obj <- igraph::graph_from_data_frame(sub_netdb,directed = F)
+w <- igraph::as_adjacency_matrix(obj,type = 'both')
+tmp <- as.integer(colnames(w))
+Wk[tmp,tmp] <- w
+return(Wk)
+}
+#' Build network between identifications based on tanimoto score.
+#'
+#' @param pubchem_cid a vector of strings indicating PubChem CID of putative ID.
+#' @return a binary matrix of network of tanimoto scores.
+get_tani_network <- function(pubchem_cid){
+### initialize W
+t <- pubchem_cid
+c <- length(t)
+Wt <- Matrix(0,ncol=c,nrow=c,sparse = T)
+##### Turn t(cid) to fpset
+fpset <- list()
+size <- 100
+groups <- as.integer(c/size)
+remain <- c%%size
+if (groups != 0){
+for (g in 1:groups){
+fpset[[g]] <- get_sdf(t[(1+(g-1)*size):(g*size)])
+}
+}
+if (remain!=0){
+fpset[[groups+1]] <- get_sdf(t[(c-remain+1):c])
+groups <- groups+1
+}
+##### get tanimoto score
+for (g1 in 1:groups){
+for (g2 in g1:groups){
+x <- fpset[[g1]]
+s1 <- length(x)
+y <- fpset[[g2]]
+s2 <- length(y)
+ind1 <- (g1-1)*100+1
+ind2 <- (g2-1)*100+1
+if (g1==g2){
+for(i in 1:s1){
+Wt[(ind1+i-1),(ind1+i-1):(ind1+s1-1)] <- fpSim(x=x[i],y=x[i:s1],method='Tanimoto')
+}
+}
+else{
+## g1!=g2
+for(i in 1:s1){
+Wt[(ind1+i-1),ind2:(ind2+s2-1)] <- fpSim(x=x[i],y=y,method='Tanimoto')
+}
+}
+}
+}
+return(Wt+t(Wt))
+}
+#' Get scores for metabolite putative IDs by LC-MS .
+#'
+#' @param filename the name of the file which the data are to be read from. Its type should be chosen
+#'             in 'extension' parameter. Also, it should have columns named exactly 'metid' (IDs for peaks),
+#'             'query_m.z' (query mass of peaks), 'exact_m.z' (exact mass of putative IDs),
+#'             'kegg_id' (IDs of putative IDs from KEGG Database), 'pubchem_cid' (CIDs of putative IDs
+#'             from PubChem Database). Otherwise, this function would not work.
+#' @param type string indicating the type of the file. It can be a 'data.frame' which is already loaded
+#'             into R, or some other specified types like a csv file.
+#' @param na a character vector of strings which are to be interpreted as NA values.
+#' @param sep a character value which seperates multiple IDs in kegg_id or pubchem_cid field, if there
+#'            are multiple IDs.
+#' @param mode string indicating the mode of metabolites. It can be positive mode (POS) or negative mode
+#'             (NEG).
+#' @param Size an integer which indicates sample size.
+#' @param delta a character value which seperates multiple IDs in kegg_id or pubchem_cid field, if there
+#'            are multiple IDs.
+#' @param gamma_mass a character indicating the mode of compounds in the data frame.
+#' @return A csv file which contains input data frame together with a column of scores in the end. In the
+#'         score column, if the row contains NA values or does not has a PubChem cid, the score would be
+#'         '-', which stands for missing value. Otherwise, each score would be from 0 to 1.
+#' @examples
+#' ## check if colnames of dataset meet requirement
+#' names(demo1)
+#' df <- subset(demo1, select = c(Query.ID,Query.Mass,Exact.Mass,KEGG,PubChem.CID))
+#' ## change colnames
+#' colnames(df) <- c('metid','query_m.z','exact_m.z','kegg_id','pubchem_cid')
+#' ## get scores
+#' out <- get_scores_for_LC_MS(df, type = 'data.frame', with_id = TRUE, na='-', mode='POS')
+#'
+#' @export
+#' @import stringr
+#' @import igraph
+#' @importFrom Matrix Matrix
+#' @importFrom stats dnorm rmultinom
+#' @importFrom utils data read.csv read.table write.csv
+get_scores_for_LC_MS <- function(filename, type = c('data.frame','csv','txt'), na = 'NA', sep = ';', mode = c('POS','NEG'), Size=5000, delta=1, gamma_mass=10){
+list_from_get_cleaned <- get_cleaned(filename, type = type, na = na, sep = sep)
+df <- list_from_get_cleaned$df
+mass <- list_from_get_cleaned$mass
+ID <- list_from_get_cleaned$ID
+## build network
+print('Start building network: it may take several minutes...')
+Wk <- get_kegg_network(ID$kid)
+Wt <- get_tani_network(ID$cid)
+Wt[Wt>=0.7] <- 1
+Wt[Wt<0.7] <- 0
+W <- pmax(Wt,Wk)
+## adjust mass according to mode
+proto_mass = 1.00727646677
+if (mode=='POS'){
+qmass<-mass$qmass-proto_mass
+} else if (mode=='NEG'){
+qmass<-mass$qmass+proto_mass
+}
+## initialize Z
+m <- dim(mass)[1]
+c <- dim(ID)[1]
+Z <- Matrix::Matrix(1,nrow=c,ncol=m,sparse=T)
+## I: binary matrix of identification~mass
+I <- Matrix::Matrix(0,nrow=c,ncol=m)
+for (i in 1:m){
+I[which(ID$metid==mass$metid[i]),i] <- 1
+}
+## load m.z data
+X <- matrix(qmass,nrow=1)
+Y <- as.matrix(as.numeric(ID$emass))
+#### Gibbs Samplings -- burn-in
+print('Start getting random samples: it may take several minutes...')
+for (s in 1:2000){
+beta_temp <- as.vector(W%*%Z%*%Matrix(1,ncol=1,nrow=m,sparse=T))
+beta <- Matrix::Matrix(beta_temp,ncol=m,nrow=c,sparse=T)-W%*%Z
+beta_sum <- Matrix::Matrix(apply(beta,1,sum),ncol=m,nrow=c,sparse=T)
+prior <- (delta+beta)/(c*delta+beta_sum)
+post <- (dnorm((1/Y)%*%X,delta,gamma_mass/3*10^(-6))*prior)*I
+post <- t(t(post)/apply(post,2,sum))
+Z <- Matrix::Matrix(apply(post,2,function(x){rmultinom(1,1,x)}),sparse=T)
+}
+#### Gibbs Samplings
+prob <- Matrix::Matrix(0,nrow=c,ncol=m,sparse=T)
+for (s in 1:(Size-2000)){
+beta_temp <- as.vector(W%*%Z%*%Matrix(1,ncol=1,nrow=m,sparse=T))
+beta <- Matrix(beta_temp,ncol=m,nrow=c,sparse=T)-W%*%Z
+beta_sum <- Matrix::Matrix(apply(beta,1,sum),ncol=m,nrow=c,sparse=T)
+prior <- (delta+beta)/(c*delta+beta_sum)
+post <- (dnorm((1/Y)%*%X,delta,gamma_mass/3*10^(-6))*prior)*I
+post <- t(t(post)/apply(post,2,sum))
+Z <- Matrix::Matrix(apply(post,2,function(x){rmultinom(1,1,x)}),sparse=T)
+prob <- Z+prob
+}
+prob <- prob/(Size-2000)
+## add score column to DF
+print('Start writing scores into a csv file...')
+index_empty <- list_from_get_cleaned$index_na
+df_dup <- list_from_get_cleaned$clean_data
+df$score <- rep(0,dim(df)[1])
+df$score[index_empty] <- '-'
+for (i in 1:m){
+subdf <- df_dup[df_dup$metid==mass$metid[i],]
+inchikeys <- subdf[!duplicated(subdf$inchikey),]$inchikey
+p <- prob[,which(mass$metid==mass$metid[i])]
+p <- p[p!=0]
+for (j in 1:length(inchikeys)){
+ind <- as.numeric(rownames(subdf[subdf$inchikey==inchikeys[j],]))
+df$score[ind] <- p[j]
+}
+}
+df$score[is.na(df$score)] <- 0
+print('Completed!')
+if (type == 'csv'){
+write.csv(df,file = 'scores.csv')
+}
+return(df)
+}
+demo1
+get_scores_for_LC_MS(demo1, type = 'data.frame', na = '-', mode = 'POS')
+sep = ';'
+Size=5000
+delta=1
+gamma_mass=10
+list_from_get_cleaned <- get_cleaned(filename, type = type, na = na, sep = sep)
+type = 'data.frame'
+na = '-'
+mode = 'POS'
+list_from_get_cleaned <- get_cleaned(filename, type = type, na = na, sep = sep)
+filename=demo1
+list_from_get_cleaned <- get_cleaned(filename, type = type, na = na, sep = sep)
+df <- list_from_get_cleaned$df
+mass <- list_from_get_cleaned$mass
+ID <- list_from_get_cleaned$ID
+## build network
+print('Start building network: it may take several minutes...')
+Wk <- get_kegg_network(ID$kid)
+Wt <- get_tani_network(ID$cid)
+knitr::opts_chunk$set(
+collapse = TRUE,
+comment = "#>"
+)
+library(stringr)
+library(Matrix)
+library(igraph)
+library(ChemmineR)
+Wt <- get_tani_network(ID$cid)
+Wt[Wt>=0.7] <- 1
+Wt[Wt<0.7] <- 0
+W <- pmax(Wt,Wk)
+## adjust mass according to mode
+proto_mass = 1.00727646677
+if (mode=='POS'){
+qmass<-mass$qmass-proto_mass
+} else if (mode=='NEG'){
+qmass<-mass$qmass+proto_mass
+}
+## initialize Z
+m <- dim(mass)[1]
+c <- dim(ID)[1]
+Z <- Matrix::Matrix(1,nrow=c,ncol=m,sparse=T)
+## I: binary matrix of identification~mass
+I <- Matrix::Matrix(0,nrow=c,ncol=m)
+for (i in 1:m){
+I[which(ID$metid==mass$metid[i]),i] <- 1
+}
+## load m.z data
+X <- matrix(qmass,nrow=1)
+Y <- as.matrix(as.numeric(ID$emass))
+#### Gibbs Samplings -- burn-in
+print('Start getting random samples: it may take several minutes...')
+for (s in 1:2000){
+beta_temp <- as.vector(W%*%Z%*%Matrix(1,ncol=1,nrow=m,sparse=T))
+beta <- Matrix::Matrix(beta_temp,ncol=m,nrow=c,sparse=T)-W%*%Z
+beta_sum <- Matrix::Matrix(apply(beta,1,sum),ncol=m,nrow=c,sparse=T)
+prior <- (delta+beta)/(c*delta+beta_sum)
+post <- (dnorm((1/Y)%*%X,delta,gamma_mass/3*10^(-6))*prior)*I
+post <- t(t(post)/apply(post,2,sum))
+Z <- Matrix::Matrix(apply(post,2,function(x){rmultinom(1,1,x)}),sparse=T)
+}
+#### Gibbs Samplings
+prob <- Matrix::Matrix(0,nrow=c,ncol=m,sparse=T)
+for (s in 1:(Size-2000)){
+beta_temp <- as.vector(W%*%Z%*%Matrix(1,ncol=1,nrow=m,sparse=T))
+beta <- Matrix(beta_temp,ncol=m,nrow=c,sparse=T)-W%*%Z
+beta_sum <- Matrix::Matrix(apply(beta,1,sum),ncol=m,nrow=c,sparse=T)
+prior <- (delta+beta)/(c*delta+beta_sum)
+post <- (dnorm((1/Y)%*%X,delta,gamma_mass/3*10^(-6))*prior)*I
+post <- t(t(post)/apply(post,2,sum))
+Z <- Matrix::Matrix(apply(post,2,function(x){rmultinom(1,1,x)}),sparse=T)
+prob <- Z+prob
+}
+prob <- prob/(Size-2000)
+## add score column to DF
+print('Start writing scores into a csv file...')
+index_empty <- list_from_get_cleaned$index_na
+df_dup <- list_from_get_cleaned$clean_data
+df$score <- rep(0,dim(df)[1])
+df$score[index_empty] <- '-'
+for (i in 1:m){
+subdf <- df_dup[df_dup$metid==mass$metid[i],]
+inchikeys <- subdf[!duplicated(subdf$inchikey),]$inchikey
+p <- prob[,which(mass$metid==mass$metid[i])]
+p <- p[p!=0]
+for (j in 1:length(inchikeys)){
+ind <- as.numeric(rownames(subdf[subdf$inchikey==inchikeys[j],]))
+df$score[ind] <- p[j]
+}
+}
+df$score[is.na(df$score)] <- 0
+print('Completed!')
+if (type == 'csv'){
+write.csv(df,file = 'scores.csv')
+}
+df
+library(MetID)
+knitr::opts_chunk$set(
+collapse = TRUE,
+comment = "#>"
+)
+library(stringr)
+library(Matrix)
+library(igraph)
+library(ChemmineR)
+get_scores_for_LC_MS(demo1, type = 'data.frame', na = '-', mode = 'POS')
+Wt <- Matrix::Matrix(0,ncol=c,nrow=c,sparse = T)
+a <- Matrix(1,nrow=3,ncol=3,sparse = T)
+a
+t(a)
+?t
+t.default()
+?t.default
+library(MetID)
+knitr::opts_chunk$set(
+collapse = TRUE,
+comment = "#>"
+)
+library(stringr)
+library(Matrix)
+library(igraph)
+library(ChemmineR)
+library(MetID)
+data("demo2")
+demo2
+names(demo2)
+df <- subset(demo2, select = c(Query.Mass,Exact.Mass,KEGG,PubChem.CID))
+demo2
+names(demo2)
+df <- subset(demo2, select = c(Query.Mass,Exact.Mass,KEGG.ID,PubChem.CID))
+colnames(df) <- c('query_m.z','exact_m.z','kegg_id','pubchem_cid')
+out <- get_scores_for_LC_MS(df, type = 'data.frame', na='-', mode='POS')
+library(MetID)
+names(demo2)
+df <- subset(demo2, select = c(Query.Mass,Exact.Mass,KEGG.ID,PubChem.CID))
+colnames(df) <- c('query_m.z','exact_m.z','kegg_id','pubchem_cid')
+out <- get_scores_for_LC_MS(df, type = 'data.frame', na='-', mode='POS')
+library(MetID)
+browseVignettes(dplyr)
+knitr::opts_chunk$set(echo = TRUE)
+data("demo1")
+dim(demo1)
+demo1
+library(MetID)
+data("demo1")
+dim(demo1)
+demo1
+library(MetID)
+library(dplyr)
+data("demo1")
+dim(demo1)
+demo1
+library(MetID)
+library(dplyr)
+data("demo1")
+dim(demo1)
+head(demo1)
+knitr::opts_chunk$set(
+collapse = TRUE,
+comment = "#>"
+)
+library(ChemmineR)
+library(MetID)
+data("demo2")
+demo2
+library(MetID)
+data("demo2")
+dim(demo2)
+head(demo2)
+data(package='MetID')
+basecit <- system.file("CITATION", package="base")
+source(basecit, echo=TRUE)
+readCitationFile(basecit)
+citation(package = 'MetID')
+remove.packages("BiocInstaller")  # repeat until R says there is no
+# package 'BiocInstaller' to remove
+source("https://bioconductor.org/biocLite.R")  # install correct version
+BiocInstaller::biocValid()
+remove.packages("BiocInstaller")  # repeat until R says there is no
+# package 'BiocInstaller' to remove
+remove.packages("BiocInstaller")  # repeat until R says there is no
+# package 'BiocInstaller' to remove
+remove.packages("BiocInstaller")  # repeat until R says there is no
+# package 'BiocInstaller' to remove
+source("https://bioconductor.org/biocLite.R")  # install correct version
+BiocInstaller::biocValid()
+source("https://bioconductor.org/biocLite.R")  # install correct version
+remove.packages("BiocInstaller")  # repeat until R says there is no
+# package 'BiocInstaller' to remove
+source("https://bioconductor.org/biocLite.R")  # install correct version
+remove.packages("BiocInstaller")
+remove.packages("BiocInstaller")
+source("https://bioconductor.org/biocLite.R")
+remove.packages("BiocInstaller")
+source("https://bioconductor.org/biocLite.R")
+BiocInstaller::biocValid()
+biocLite(c("rstudioapi", "sessioninfo"))
+source("https://bioconductor.org/biocLite.R")  # install correct version
+BiocInstaller::biocValid()
+remove.packages(yaml)
+install.packages(yaml)
+install.packages("yaml")
+devtools::check()
+devtools::check()
+demo1
+demo1$name[3] <- 'N-(3AZA±,12AZA±-dihydroxy-5AZA²-cholan-24-oyl)-glycine'
+demo1
+save(demo1, file = 'data/demo1.RData')
+demo2$Name[3] <- 'N-(3AZA±,12AZA±-dihydroxy-5AZA²-cholan-24-oyl)-glycine'
+demo2
+save(demo2, file = 'data/demo1.RData')
+devtools::check()
+devtools::check()
+save(demo2, file = 'data/demo2.RData')
+demo1
+data(demo1)
+demo1
+demo2
+demo1 <- demo2
+demo1
+colnames(demo2)
+colnames(demo2) <- c('query_m.z','name','formula', 'exact_m.z','pubchem_cid','kegg_id')
+demo1
+demo2
+save(demo1, file = 'data/demo2.RData')
+save(demo2, file = 'data/demo1.RData')
+devtools::check()
+library(MetID)
+data(demo1)
+demo1
+data(demo2)
+demo2
+tmp <- demo1
+tmp
+tmp1 <- demo2
+tmp1
+rm('demo1')
+rm('demo2')
+tmp1
+save(tmp1, file = 'data/demo1.RData')
+save(tmp, file = 'data/demo2.RData')
+tmp
+tmp
+tmp1
+load("C:/Users/xw187/Desktop/MetID2/data/demo1.RData")
+demo1
+demo2
+load("C:/Users/xw187/Desktop/MetID2/data/demo2.RData")
+demo2
+View(tmp)
+View(tmp1)
+remove.packages(MetID)
+library("MetID", lib.loc="~/R/R-3.4.2/library")
+data(demo1)
+demo1
+data(demo2)
+demo2
+rm('demo1')
+rm('demo2')
+save(tmp1, file = 'data/demo1.RData')
+save(tmp, file = 'data/demo2.RData')
+save(demo1, file = 'data/demo2.RData')
+load("C:/Users/xw187/Desktop/MetID2/data/demo2.RData")
+View(demo1)
+demo2
+demo1
+load("C:/Users/xw187/Desktop/MetID2/data/demo1.RData")
+load("C:/Users/xw187/Desktop/MetID2/data/demo2.RData")
+View(tmp1)
+View(demo1)
+demo2 <- demo1
+demo1 <- tmp1
+rm('tmp1')
+View(demo1)
+View(demo2)
+save(demo1, file = 'data/demo1.RData')
+save(demo2, file = 'data/demo2.RData')
+load("C:/Users/xw187/Desktop/MetID2/data/demo1.RData")
+load("C:/Users/xw187/Desktop/MetID2/data/demo2.RData")
+View(demo1)
+View(demo2)
+library(MetID)
+devtools::check()
+devtools::check()
+demo1
+install.packages("mlegp")
+library(mlegp)
+detach("package:mlegp", unload=TRUE)
+library(MetID)
+get_scores_for_LC_MS(demo1,type='data.frame',na='-',mode = 'POS')
+library(MetID)
+get_scores_for_LC_MS(demo1,type='data.frame',na='-',mode = 'POS')
+library(MetID)
+get_scores_for_LC_MS(demo1,type='data.frame',na='-',mode = 'POS')
+source("https://bioconductor.org/biocLite.R")
+biocLite("BiocCheck")
+system.file(package = 'MetID')
+BiocCheck(system.file(package = 'MetID'))
+biocLite("BiocCheck")
+library(BiocCheck)
+BiocCheck(system.file(package = 'MetID'))
+library(MetID)
+BiocCheck(system.file(package = 'MetID'))
+system.file(package = 'MetID')
+BiocCheck(system.file(package = 'binman'))
+library("MetID", lib.loc="~/R/R-3.4.2/library")
+BiocCheck(system.file(package = 'MetID'))
+BiocCheck("C:/Users/xw187/Desktop/MetID_0.99.0.tar.gz")
+BiocCheck('MetID')
+getwd()
+setwd('C:/Users/xw187/Desktop')
+BiocCheck('MetID')
+setwd('C:/Users/xw187/Desktop/')
+BiocCheck('MetID')

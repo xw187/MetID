@@ -1,0 +1,76 @@
+---
+title: "Introduction to MetID"
+author: "Xuchen Wang"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Vignette Title}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE, warning=FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+library(ChemmineR)
+```
+
+
+When working with MetID package you must:
+
+* Install dependent packages 'stringr', 'Matrix', 'igraph' on CRAN and install 'ChemmineR' on BioConductor (see https://bioconductor.org/packages/release/bioc/html/ChemmineR.html for instruction).
+
+* Have a data file with .csv or .txt extension. Otherwise, you need to read it in R as a 'data.frame' object first.
+
+* Check if the colnames of your data meet requirements: columns named exactly as 'metid' (IDs for peaks), 'query_m.z' (query mass of peaks), 'exact_m.z' (exact mass of putative IDs), 'kegg_id' (IDs of putative IDs from KEGG Database), 'pubchem_cid' (CIDs of putative IDs from PubChem Database).
+
+
+The get_scores_for_LC_MS function in MetID package can help you get scores for putative IDs for each metabolite. This document introduces you to this tool for LC-MS data and shows you how to apply it to LC-MS data with putative IDs.
+
+## Example1: demo1
+
+To give a sense on how to use get_scores_for_LC_MS function to get scores, we will use our demo1 dataset as an example. This dataset only contains 3 compounds and is documented in ?demo1. Note: the scores are only meaningful when we have a dataset with a large number of compounds.
+
+```{r}
+library(MetID)
+data("demo1")
+dim(demo1)
+head(demo1)  # only print the first five
+```
+
+Note that its colnames already meet our requirements. So we can use this dataset directly.
+
+```{r}
+get_scores_for_LC_MS(demo1, type = 'data.frame', na = '-', mode = 'POS')
+```
+
+
+The score column shows scores for putative IDs for each metabolite.
+
+
+## Example2: demo2
+
+As mentioned before, demo1 dataset already meets our requirements and we can use it directly. But what if we have a datset that does not meet the requirements. We will use our demo2 dataset to show that. Demo2 dataset is just the same as demo1 dataset except that colnames in demo2 are different and is documented in ?demo2.
+
+```{r}
+library(MetID)
+data("demo2")
+dim(demo2)
+head(demo2)
+```
+
+Since the colnames do not meet the requirements, we need to change its colnames before we use get_scores_for_LC_MS function.
+
+```{r}
+names(demo2)
+df <- subset(demo2, select = c(Query.Mass,Exact.Mass,KEGG.ID,PubChem.CID))
+colnames(df) <- c('query_m.z','exact_m.z','kegg_id','pubchem_cid')
+out <- get_scores_for_LC_MS(df, type = 'data.frame', na='-', mode='POS')
+```
+
+
+## Other data sources
+
+We also include large datasets which generate meaningful scores in the package. See data(package='MetID') for the list of datasets. As well as data frames, MetID works with data that is stored in other ways, like csv files and text files.
