@@ -123,13 +123,17 @@ get_first <- function(id){
 
 get_inchikey <- function(id){
   # This function gets the fist 14 charactors of InchiKey from PubChem database.
+  data('InchiKey')
   n <- length(id)
   response <- rep(NA,n)
   for (i in 1:n){
     if (!is.na(id[i])){
-      path <- paste(system.file(package="MetID"), "get_inchikey.py", sep="/")
-      command <- paste('/anaconda/bin/python', path, id[i])
-      response[i] <- substr(system(command, intern=T),1,14)
+      if (!id[i] %in% InchiKey$CID){
+        response[i] <- as.character(id[i])
+      }
+      else{
+        response[i] <- substr(InchiKey$InchiKey[which(InchiKey$CID %in% id[i])],1,14)
+      }
     }
   }
   return(response)
@@ -138,7 +142,6 @@ get_inchikey <- function(id){
 
 combine_inchikey <- function(compound){
   # This function combines identifications with same InchiKey.
-  data("InchiKey")
   group <- compound$inchikey[!duplicated(compound$inchikey)]
   combined <- compound[1:length(group),]
   for (j in 1:length(group)){
