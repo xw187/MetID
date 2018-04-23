@@ -138,6 +138,7 @@ get_inchikey <- function(id){
 
 combine_inchikey <- function(compound){
   # This function combines identifications with same InchiKey.
+  data("InchiKey")
   group <- compound$inchikey[!duplicated(compound$inchikey)]
   combined <- compound[1:length(group),]
   for (j in 1:length(group)){
